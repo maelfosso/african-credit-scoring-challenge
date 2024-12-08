@@ -1,0 +1,19 @@
+A customer (customer_id) has taken out a loan (tbl_loan_id) from a lender (lender_id) from a country (country_id)
+
+Observations:
+- A customer may appear multiple times in the train and test dataset
+  - is there a relationship between the number of times the customer appears and whether or not he defaulted on the loan
+  - He may appear multiple times. 
+    - same loan or not?
+    - what about the **New_versus_repeat** column?
+
+
+date of the loan
+- how many loan taken before?
+- how many loan defaulted?
+
+
+target
+- what in the data indicate that a customer will not default?
+- for a customer who did not default, eg: 261535 who only not default 2 times, what makes the difference? what make him not default?
+- 
