@@ -17,3 +17,15 @@ target
 - what in the data indicate that a customer will not default?
 - for a customer who did not default, eg: 261535 who only not default 2 times, what makes the difference? what make him not default?
 - 
+
+
+
+- a-t-il rembourse le precedent?
+- le precedent est-il encore en cours?
+- a quand remonte le precedent?
+- 
+
+- la distance entre la date de remboursement du precedent pret et la date de decaissement du pret en cours
+- la distance entre le date de remboursement du pret en cours et celui du precedent pret
+- le montant du pret en cours couvre-t-il le montant du precedent pret a rembourser? (la difference)
+- le montant du pret en cours couvre-t-il le montant a rembourser a l'institution qui lui donne le pret? (la difference)
