@@ -616,11 +616,133 @@ lr_frs <-
   )
 
 lr_frs |> collect_metrics()
+# A tibble: 162 × 10
+# penalty mixture over_ratio num_comp .metric .estimator  mean     n  std_err .config             
+# <dbl>   <dbl>      <dbl>    <int> <chr>   <chr>      <dbl> <int>    <dbl> <chr>               
+#   1 0.0000000001     0          0.5        3 f_meas  binary     0.970    10 0.000637 Preprocessor1_Model1
+# 2 0.0000000001     0          0.5        3 roc_auc binary     0.662    10 0.00850  Preprocessor1_Model1
+# 3 0.00001          0          0.5        3 f_meas  binary     0.970    10 0.000637 Preprocessor1_Model2
+# 4 0.00001          0          0.5        3 roc_auc binary     0.662    10 0.00850  Preprocessor1_Model2
+# 5 1                0          0.5        3 f_meas  binary     0.993    10 0.000234 Preprocessor1_Model3
+# 6 1                0          0.5        3 roc_auc binary     0.661    10 0.00840  Preprocessor1_Model3
+# 7 0.0000000001     0.5        0.5        3 f_meas  binary     0.968    10 0.000735 Preprocessor1_Model4
+# 8 0.0000000001     0.5        0.5        3 roc_auc binary     0.662    10 0.00849  Preprocessor1_Model4
+# 9 0.00001          0.5        0.5        3 f_meas  binary     0.968    10 0.000735 Preprocessor1_Model5
+# 10 0.00001          0.5        0.5        3 roc_auc binary     0.662    10 0.00849  Preprocessor1_Model5
 
-lr_fit <- 
+lr_frs |> show_best(metric = "f_meas")
+
+lr_best <-
+  lr_frs |>
+  select_best(metric = "f_meas")
+
+lr_best
+
+# lr_fit <- 1
+#   lr_wf |>
+#   fit(data = train)
+
+lr_final_wf <-
   lr_wf |>
+  finalize_workflow(lr_best)
+
+lr_fit <-
+  lr_final_wf |>
   fit(data = train)
 
 lr_fit |>
   predict(test) |>
   table()
+
+lr_fit |>
+  predict(test) |>
+  bind_cols(test) |>
+  mutate(target = .pred_class) |>
+  select(ID, target) |>
+  mutate(
+    target = case_when(
+      target == 'No' ~ 0,
+      target == 'Yes' ~ 1
+    )
+  ) |>
+  write.csv("submission-lr-pca-zv.csv", row.names = FALSE)
+# => Submission lr-pca-zv 0.07494824
+
+lr_frs |> 
+  collect_metrics() |> 
+  filter(0.7 <= mean & mean <= 0.8) |>
+  arrange(mean)
+
+lr_worst_param <-
+  tibble(
+    penalty = 1,
+    mixture = 0.5,
+    over_ratio = 0.5,
+    num_comp = 3
+  )
+
+lr_worst_final_wf <-
+  lr_wf |>
+  finalize_workflow(lr_worst_param)
+
+lr_worst_fit <-
+  lr_worst_final_wf |>
+  fit(data = train)
+
+lr_worst_fit |>
+  predict(test) |>
+  table()
+
+# .pred_class
+# No   Yes 
+# 18594     0 
+
+lr_frs |> 
+  collect_metrics() |> 
+  filter(0.7 <= mean & mean <= 0.8) |>
+  arrange(mean)
+
+lr_middle_param <-
+  tibble(
+    penalty = 1,
+    mixture = 0,
+    over_ratio = 0.5,
+    num_comp = 12
+  )
+
+lr_middle_final_wf <-
+  lr_wf |>
+  finalize_workflow(lr_middle_param)
+
+lr_middle_fit <-
+  lr_middle_final_wf |>
+  fit(data = train)
+
+lr_middle_fit |>
+  predict(test) |>
+  table()
+
+############## Naive Bayes
+
+nb_wf <-
+  workflow() |>
+  add_model(nb_model) |>
+  add_recipe(pca_zv_recipe)
+
+nb_wf |> extract_parameter_set_dials()
+
+nb_tune <-
+  nb_wf |>
+  tune_grid(
+    folds,
+    grid = grid_regular(
+      smoothness(),
+      Laplace(),
+      over_ratio(),
+      num_comp(c(3, 29))
+    ),
+    metrics = metrics,
+    control = control_gd
+  )
+
+lr_frs |> collect_metrics()
