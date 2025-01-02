@@ -1,33 +1,37 @@
+if(!require(discrim)){install.packages("discrim")}
+if(!require(MASS)){install.packages("MASS")}
+if(!require(ranger)){install.packages("ranger")}
+if(!require(xgboost)) install.packages("xgboost")
+if(!require(lubridate)) install.packages("lubridate")
+if(!require(themis)) install.packages("themis")
+
+library(parsnip) # Load parsnip first
+library(discrim)
+
 library(tidymodels)
 tidymodels_prefer()
 
 train <- read.csv('data/train_no_duplicates.csv')
 head(train)
+str(train)
 
 test <- read.csv('data/Test.csv')
 head(test)
 
-folds <- group_vfold_cv(train, v = 10, group = customer_id)
-
-# folds <- vfold_cv(train, v = 10, strata = target)
-# train <-
-#   train |> 
-#   select(-target) |>
-#   bind_rows(test) |>
-#   summary()
-
-
-names(train)
-features <- c(
-  "country_id", "lender_id",
-  "loan_type", "New_versus_Repeat",
-  "disturbement_date", "due_date",
-  "Total_Amount", "Total_Amount_to_Repay", "duration", 
-  "Amount_Funded_By_Lender", "Lender_portion_Funded", "Lender_portion_to_be_repaid"
-)
-
 # Before all `target` must be a factor
-train$target <- as.factor(train$target)
+# train$target <- as.factor(train$target)
+train <-
+  train |>
+  mutate(
+    target = case_when(
+      target == 0 ~ 'No',
+      target == 1 ~ 'Yes'
+    )
+  ) |>
+  mutate(target = factor(target))
+
+# folds <- group_vfold_cv(train, v = 10, group = customer_id)
+folds <- vfold_cv(train, v = 10, strata = target)
 
 #####
 # lender_id
@@ -282,21 +286,6 @@ train |> filter(Lender_portion_Funded == 0) |> nrow()
 # => 8518, that is around 13% of the training that
 # Why 0? Why didn't the Lended fund a part of that lend?
 
-recipe(target ~ Lender_portion_Funded, data = train) |>
-  step_mutate(Lender_portion_Funded = log10_trans(Lender_portion_Funded)) |>
-  step_log(Lender_portion_Funded, base = 10) |>
-  step_YeoJohnson(Lender_portion_Funded) |>
-  prep() |> bake(new_data = NULL) |>
-  ggplot(aes(x = Lender_portion_Funded)) + geom_histogram(bins = 50)
-box# => Nothing as changed
-
-recipe(target ~ Lender_portion_Funded, data = train) |>
-  step_log(Lender_portion_Funded, base = 10) |>
-  step_BoxCox(Lender_portion_Funded) |>
-  prep() |> bake(new_data = NULL) |>
-  ggplot(aes(x = Lender_portion_Funded)) + geom_histogram(bins = 50)
-
-
 ##############
 # Lender_portion_to_be_repaid
 #########
@@ -322,12 +311,49 @@ basic_recipe <-
   step_string2factor(loan_type, levels = all_loan_type) |>
   step_string2factor(New_versus_Repeat, levels = all_new_versus_repeat) |>
   step_other(loan_type, threshold = 0.1 / 100) |>
-  step_date(all_date()) |>
-  step_normalize(Total_Amount, Total_Amount_to_Repay, Amount_Funded_By_Lender, Lender_portion_to_be_repaid, Lender_portion_to_be_repaid) |>
-  step_log(duration, Total_Amount, Total_Amount_to_Repay, Amount_Funded_By_Lender, Lender_portion_to_be_repaid, base = 10) |>
+  step_mutate(
+    disbursement_date = ymd(disbursement_date),
+    due_date = ymd(due_date)
+  ) |>
+  step_date(
+    all_of(c("disbursement_date", "due_date")),
+    features = c("dow", "doy", "month", "year"),
+    keep_original_cols = FALSE
+  ) |>
+  step_log(duration, Total_Amount, Total_Amount_to_Repay, Amount_Funded_By_Lender, Lender_portion_to_be_repaid, base = 10, offset = 0.001) |>
+  step_normalize(Total_Amount, Total_Amount_to_Repay, Amount_Funded_By_Lender, Lender_portion_to_be_repaid, Lender_portion_to_be_repaid, na_rm = TRUE) |>
   step_cut(duration, breaks = ggplot_build(p)$data[[1]]$x) |>
-  step_dummy(loan_type, New_versus_Repeat, duration, one_hot = TRUE)
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) |>
+  step_smote(target, over_ratio = tune())
 
+basic_recipe |>
+  prep() |>
+  bake(new_data = NULL) |> str()
+
+tidy(basic_recipe, number = 2)
+#####
+# Let's go with multiple recipe
+#####
+
+pca_recipe <-
+  basic_recipe |>
+  step_pca(all_numeric_predictors(), num_comp = tune()) |>
+  step_normalize(all_numeric_predictors())
+
+zv_recipe <-
+  basic_recipe |>
+  step_zv(all_predictors()) |>
+  step_nzv(all_predictors()) |>
+  step_corr(all_numeric_predictors(), threshold = 0.9) |>
+  step_normalize(all_numeric_predictors())
+
+pca_zv_recipe <-
+  basic_recipe |>
+  step_zv(all_predictors()) |>
+  step_nzv(all_predictors()) |>
+  step_corr(all_numeric_predictors(), threshold = 0.9) |>
+  step_pca(all_numeric_predictors(), num_comp = tune()) |>
+  step_normalize(all_numeric_predictors())
 
 ############
 # MODELS
@@ -337,30 +363,18 @@ dt_model <-
   set_engine('rpart') |>
   set_mode('classification')
 
-lda_model <-
-  discrim_linear() |>
-  set_engine('MASS')
-
-qda_model <-
-  discrim_quad() |>
-  set_engine('MASS')
-
 lr_model <-
-  logistic_reg() |>
-  set_engine('glm')
+  logistic_reg(penalty = tune(), mixture = tune()) |>
+  set_engine('glmnet') |>
+  set_mode("classification")
 
 nb_model <-
   naive_Bayes(smoothness = tune(), Laplace = tune()) |>
   set_engine('klaR') |>
   set_mode("classification")
 
-knn_model <-
-  nearest_neighbor(neighbors = tune(), weight_func = tune(), dist_power = tune()) |>
-  set_engine('kknn') |>
-  set_mode('classification')
-
 rf_model <-
-  rand_forest(mtry = tune(), min_n = tune()) |>
+  rand_forest(mtry = tune(), min_n = tune(), trees = tune()) |>
   set_engine('ranger') |>
   set_mode('classification')
 
@@ -372,62 +386,241 @@ svm_model <-
 # WORKFLOW
 #########
 
+metrics <- metric_set(roc_auc, f_meas)
+control_rs <- control_resamples(
+  verbose = TRUE,
+  save_pred = FALSE,
+  parallel_over = "everything"
+)
+control_gd <- control_grid(
+  verbose = TRUE,
+  save_pred = FALSE,
+  parallel_over = "everything"
+)
+control_wf <- control_grid(
+  save_pred = TRUE,
+  parallel_over = "everything",
+  save_workflow = FALSE
+)
+
 set.seed(1)
 
-preproc = list(
-  basic = basic_recipe
-)
+########## Decision Tree
 
-models <- list(
-  knn = knn_model,
-  lr = lr_model,
-  # svm = svm_model,
-  # tree = dt_model,
-  # lda = lda_model,
-  # qda = qda_model,
-  # rf = rf_model,
-  nb = nb_model,
-  svm = svm_model
-)
-
-wf_set <- workflow_set(preproc, models, cross = TRUE)
-wf_set
-
-tuning <- 
-  wf_set |>
-  workflow_map(
-    "tune_grid",
-    resamples = folds,
-    grid = 20,
-    metrics = metric_set(f_meas, roc_auc),
-    verbose = TRUE
-  )
-tuning
-
-workflow() |>
-  add_model(nb_model)
-
-logistic_reg_glm_wf <-
+### PCA Recipe
+dt_pca_wf <-
   workflow() |>
-  add_model(logistic_reg_glm_model) |>
-  add_variables(outcomes = target, predictors = c(country_id, loan_type, new_vs_repeat))
+  add_model(dt_model) |>
+  add_recipe(pca_recipe)
 
-logistic_reg_glm_fit <-
-  logistic_reg_glm_wf |>
-  remove_variables() |>
-  add_recipe(cat_features_recipe) |> fit(train)
+dt_pca_grid <-
+  grid_regular(
+    over_ratio(c(0.5, 0.8)),
+    num_comp(c(3, 20)),
+    cost_complexity(),
+    tree_depth(),
+    min_n()
+  )
 
-extract_fit_parsnip(logistic_reg_glm_fit) |>
-  tidy()
+dt_pca_tune <-
+  dt_pca_wf |>
+  tune_grid(
+    resamples = folds,
+    grid = dt_pca_grid,
+    metrics = metrics,
+    control = control_gd
+  )
+dt_pca_tune |> collect_metrics()
 
-logistic_reg_glm_pred <-
-  predict(logistic_reg_glm_fit, test |> mutate(new_vs_repeat = New_versus_Repeat))
-table(logistic_reg_glm_pred)
-head(test)
+dt_pca_tune |>
+  show_best(metric = "f_meas")
+# A tibble: 5 × 11
+# cost_complexity tree_depth min_n over_ratio num_comp .metric .estimator  mean     n  std_err .config              
+# <dbl>      <int> <int>      <dbl>    <int> <chr>   <chr>      <dbl> <int>    <dbl> <chr>                
+#   1    0.0000000001          1     2        0.8        3 f_meas  binary     0.984    10 0.000451 Preprocessor3_Model01
+# 2    0.00000316            1     2        0.8        3 f_meas  binary     0.984    10 0.000451 Preprocessor3_Model02
+# 3    0.1                   1     2        0.8        3 f_meas  binary     0.984    10 0.000451 Preprocessor3_Model03
+# 4    0.1                   8     2        0.8        3 f_meas  binary     0.984    10 0.000451 Preprocessor3_Model06
+# 5    0.1                  15     2        0.8        3 f_meas  binary     0.984    10 0.000451 Preprocessor3_Model09
 
-test |>
-  select(ID) |>
-  bind_cols(logistic_reg_glm_pred) |>
+dt_pca_tune |>
+  show_best(metric = "roc_auc")
+# A tibble: 5 × 11
+# cost_complexity tree_depth min_n over_ratio num_comp .metric .estimator  mean     n std_err .config              
+# <dbl>      <int> <int>      <dbl>    <int> <chr>   <chr>      <dbl> <int>   <dbl> <chr>                
+#   1    0.0000000001         15    40       0.8        20 roc_auc binary     0.762    10 0.00771 Preprocessor9_Model25
+# 2    0.00000316           15    40       0.8        20 roc_auc binary     0.762    10 0.00771 Preprocessor9_Model26
+# 3    0.0000000001         15    40       0.65       20 roc_auc binary     0.750    10 0.00598 Preprocessor8_Model25
+# 4    0.00000316           15    40       0.65       20 roc_auc binary     0.750    10 0.00598 Preprocessor8_Model26
+# 5    0.0000000001         15    40       0.5        20 roc_auc binary     0.750    10 0.0103  Preprocessor7_Model25
+
+dt_best_pca_f1 <-
+  dt_pca_tune |>
+  select_best(metric = "f_meas")
+dt_best_pca_f1
+# A tibble: 1 × 6
+# cost_complexity tree_depth min_n over_ratio num_comp .config              
+# <dbl>      <int> <int>      <dbl>    <int> <chr>                
+#   1    0.0000000001          1     2        0.8        3 Preprocessor3_Model01
+
+dt_best_pca_roc.auc <-
+  dt_pca_tune |>
+  select_best(metric = "roc_auc")
+dt_best_pca_roc.auc
+# A tibble: 1 × 6
+# cost_complexity tree_depth min_n over_ratio num_comp .config              
+# <dbl>      <int> <int>      <dbl>    <int> <chr>                
+#   1    0.0000000001         15    40        0.8       20 Preprocessor9_Model25
+
+
+dt_pca_final_wf.f1 <-
+  dt_pca_wf |>
+  finalize_workflow(dt_best_pca_f1)
+
+dt_pca_final_fit.f1 <-
+  dt_pca_final_wf.f1 |>
+  fit(data = train)
+
+dt_pca_final_fit.f1 |>
+  predict(test) |>
+  table()
+
+dt_pca_final_fit.f1 |>
+  predict(test) |>
+  bind_cols(test) |>
   mutate(target = .pred_class) |>
   select(ID, target) |>
-  write.csv("submission.csv", row.names = FALSE)
+  mutate(
+    target = case_when(
+      target == 'No' ~ 0,
+      target == 'Yes' ~ 1
+    )
+  ) |>
+  write.csv("submission_dt_pca_f1.csv", row.names = FALSE)
+# => Submission : 0.202247191 WORST EVER
+
+dt_pca_final_wf.roc_auc <-
+  dt_pca_wf |>
+  finalize_workflow(dt_best_pca_roc.auc)
+
+dt_pca_final_fit.roc_auc <-
+  dt_pca_final_wf.roc_auc |>
+  fit(data = train)
+
+dt_pca_final_fit.roc_auc |>
+  predict(test) |>
+  table()
+
+dt_pca_final_fit.roc_auc |>
+  predict(test) |>
+  bind_cols(test) |>
+  mutate(target = .pred_class) |>
+  select(ID, target) |>
+  mutate(
+    target = case_when(
+      target == 'No' ~ 0,
+      target == 'Yes' ~ 1
+    )
+  ) |>
+  write.csv("submission_dt_pca_roc_auc.csv", row.names = FALSE)
+# => Submission: Worst ever 0.182987848
+
+####
+# As Decision Tree is really worst, let's try Random Forest
+
+
+##### BASIC
+rf_wf.basic <-
+  workflow() |>
+  add_model(rf_model) |>
+  add_recipe(basic_recipe)
+
+rf_grid.basic <-
+  grid_regular(
+    over_ratio(c(0.5, 0.8)),
+    mtry(c(2, 29)),
+    trees(c(500, 1000)),
+    min_n(c(2, 40)),
+    levels = c(3, 10, 3, 5)
+  )
+
+rf_tune.basic <-
+  rf_wf.basic |>
+  tune_grid(
+    folds,
+    grid = rf_grid.basic,
+    metrics = metrics,
+    control = control_gd
+  )
+
+rf_tune.basic |> collect_metrics()
+
+autoplot(rf_tune)
+
+rf_best <-
+  rf_tune |>
+  select_best(metric = "f_meas")
+
+rf_best
+
+######### ZV PCA
+
+
+rf_wf.pca_zv <-
+  workflow() |>
+  add_model(rf_model) |>
+  add_recipe(pca_zv_recipe)
+
+rf_grid.pca_zv <-
+  grid_regular(
+    over_ratio(c(0.5, 0.8)),
+    num_comp(3, 21),
+    mtry(c(2, 29)),
+    trees(c(500, 1000)),
+    min_n(c(2, 40)),
+    levels = c(3, 10, 3, 5)
+  )
+
+rf_tune.pca_zv <-
+  rf_wf.pca_zv |>
+  tune_grid(
+    folds,
+    grid = rf_grid.pca_zv,
+    metrics = metrics,
+    control = control_gd
+  )
+
+
+####### Logistic Regression
+lr_model |> translate()
+
+lr_wf <-
+  workflow() |>
+  add_model(lr_model) |>
+  add_recipe(pca_zv_recipe)
+
+lr_wf |> extract_parameter_set_dials()
+
+lr_frs <-
+  lr_wf |>
+  tune_grid(
+    folds,
+    grid = grid_regular(
+      over_ratio(c(0.5, 1)),
+      num_comp(c(3, 21)),
+      penalty(),
+      mixture()
+    ),
+    metrics = metrics,
+    control = control_gd
+  )
+
+lr_frs |> collect_metrics()
+
+lr_fit <- 
+  lr_wf |>
+  fit(data = train)
+
+lr_fit |>
+  predict(test) |>
+  table()
